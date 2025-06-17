@@ -1,5 +1,5 @@
 import './App.css'
-import AdvancedRAGChat from './AdvancedRAGChat'
+import { AdvancedRAGChat } from './components/rag-chat'
 
 function App() {
 

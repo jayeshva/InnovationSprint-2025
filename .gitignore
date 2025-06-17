@@ -5,3 +5,8 @@ node_modules/
 
 # omit .env file
 .env
+
+venv/
+__pycache__/
+chroma_db/
+uploads/

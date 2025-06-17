@@ -1,11 +1,40 @@
 import os
 import uuid
+from bedrock_claude import BedrockClaudeClient
 import docx
 import PyPDF2
 import chromadb
+import re
 from datetime import datetime
-from openai import OpenAI
 from chromadb.utils import embedding_functions
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List, Optional
+import shutil
+from dotenv import load_dotenv
+from pydantic import BaseModel
+
+
+# Load environment variables from .env file
+load_dotenv()
+
+def secure_filename(filename):
+    """
+    Sanitize a filename to ensure it's safe for storage.
+    Removes any path components and replaces unsafe characters.
+    """
+    # Remove any directory path components
+    filename = os.path.basename(filename)
+    
+    # Replace any non-alphanumeric characters except for periods, hyphens, and underscores
+    filename = re.sub(r'[^\w\.-]', '_', filename)
+    
+    # Ensure the filename is not empty
+    if not filename:
+        filename = 'unnamed_file'
+        
+    return filename
 
 # =============================================================================
 # DOCUMENT PROCESSING AND UTILITIES
@@ -84,6 +113,8 @@ def split_text(text: str, chunk_size: int = 500):
 class RAGDatabase:
     def __init__(self, db_path: str = "chroma_db", collection_name: str = "documents_collection"):
         """Initialize ChromaDB with persistence"""
+        self.db_path = db_path
+        self.default_collection_name = collection_name
         self.client = chromadb.PersistentClient(path=db_path)
         
         # Configure sentence transformer embeddings
@@ -91,13 +122,47 @@ class RAGDatabase:
             model_name="all-MiniLM-L6-v2"
         )
         
-        # Create or get existing collection
-        self.collection = self.client.get_or_create_collection(
+        # Dictionary to track session collections
+        self.session_collections = {}
+        
+        # Create or get default collection
+        self.default_collection = self.client.get_or_create_collection(
             name=collection_name,
             embedding_function=self.sentence_transformer_ef
         )
     
-    def process_document(self, file_path: str):
+    def get_collection_for_session(self, session_id: str = None):
+        """Get or create a collection for a specific session"""
+        if not session_id:
+            return self.default_collection
+            
+        if session_id not in self.session_collections:
+            collection_name = f"session_{session_id}"
+            self.session_collections[session_id] = self.client.get_or_create_collection(
+                name=collection_name,
+                embedding_function=self.sentence_transformer_ef
+            )
+            
+        return self.session_collections[session_id]
+    
+    def clear_session_data(self, session_id: str):
+        """Clear all data for a specific session"""
+        if not session_id:
+            return False
+            
+        collection_name = f"session_{session_id}"
+        try:
+            if session_id in self.session_collections:
+                del self.session_collections[session_id]
+                
+            if collection_name in [col.name for col in self.client.list_collections()]:
+                self.client.delete_collection(collection_name)
+            return True
+        except Exception as e:
+            print(f"Error clearing session data: {str(e)}")
+            return False
+    
+    def process_document(self, file_path: str, session_id: str = None):
         """Process a single document and prepare it for ChromaDB"""
         try:
             # Read the document
@@ -108,8 +173,13 @@ class RAGDatabase:
             
             # Prepare metadata
             file_name = os.path.basename(file_path)
-            metadatas = [{"source": file_name, "chunk": i} for i in range(len(chunks))]
-            ids = [f"{file_name}_chunk_{i}" for i in range(len(chunks))]
+            metadatas = [{"source": file_name, "chunk": i, "session_id": session_id} for i in range(len(chunks))]
+            
+            # Include session_id in the document IDs if provided
+            if session_id:
+                ids = [f"{session_id}_{file_name}_chunk_{i}" for i in range(len(chunks))]
+            else:
+                ids = [f"{file_name}_chunk_{i}" for i in range(len(chunks))]
             
             return ids, chunks, metadatas
             
@@ -117,21 +187,24 @@ class RAGDatabase:
             print(f"Error processing {file_path}: {str(e)}")
             return [], [], []
     
-    def add_to_collection(self, ids, texts, metadatas):
+    def add_to_collection(self, ids, texts, metadatas, session_id: str = None):
         """Add documents to collection in batches"""
         if not texts:
             return
             
+        # Get the appropriate collection
+        collection = self.get_collection_for_session(session_id)
+            
         batch_size = 100
         for i in range(0, len(texts), batch_size):
             end_idx = min(i + batch_size, len(texts))
-            self.collection.add(
+            collection.add(
                 documents=texts[i:end_idx],
                 metadatas=metadatas[i:end_idx],
                 ids=ids[i:end_idx]
             )
     
-    def process_and_add_documents(self, folder_path: str):
+    def process_and_add_documents(self, folder_path: str, session_id: str = None):
         """Process all documents in a folder and add to collection"""
         if not os.path.exists(folder_path):
             print(f"Folder {folder_path} does not exist")
@@ -143,13 +216,14 @@ class RAGDatabase:
         
         for file_path in files:
             print(f"Processing {os.path.basename(file_path)}...")
-            ids, texts, metadatas = self.process_document(file_path)
-            self.add_to_collection(ids, texts, metadatas)
+            ids, texts, metadatas = self.process_document(file_path, session_id)
+            self.add_to_collection(ids, texts, metadatas, session_id)
             print(f"Added {len(texts)} chunks to collection")
     
-    def semantic_search(self, query: str, n_results: int = 3):
+    def semantic_search(self, query: str, session_id: str = None, n_results: int = 3):
         """Perform semantic search on the collection"""
-        results = self.collection.query(
+        collection = self.get_collection_for_session(session_id)
+        results = collection.query(
             query_texts=[query],
             n_results=n_results
         )
@@ -221,170 +295,445 @@ class ConversationManager:
 # =============================================================================
 
 class RAGChatbot:
-    def __init__(self, openai_api_key: str, db_path: str = "chroma_db"):
-        """Initialize RAG Chatbot"""
-        # Set OpenAI API key
-        os.environ["OPENAI_API_KEY"] = openai_api_key
-        self.openai_client = OpenAI()
-        
-        # Initialize database and conversation manager
-        self.db = RAGDatabase(db_path)
+    def __init__(self, db: RAGDatabase = None):
+        """Initialize RAG Chatbot with Claude via AWS Bedrock"""
+        self.claude_client = BedrockClaudeClient()
+        self.db = db
         self.conversation_manager = ConversationManager()
-    
+
     def load_documents(self, folder_path: str):
-        """Load documents from a folder into the database"""
         self.db.process_and_add_documents(folder_path)
-    
+
     def contextualize_query(self, query: str, conversation_history: str):
         """Convert follow-up questions into standalone queries"""
         if not conversation_history.strip():
             return query
-            
-        contextualize_prompt = """Given a chat history and the latest user question
-        which might reference context in the chat history, formulate a standalone
-        question which can be understood without the chat history. Do NOT answer
-        the question, just reformulate it if needed and otherwise return it as is."""
-        
+
+        prompt = f"""Given a chat history and the latest user question
+which might reference context in the chat history, formulate a standalone
+question which can be understood without the chat history. Do NOT answer
+the question, just reformulate it if needed and otherwise return it as is.
+
+Chat history:
+{conversation_history}
+
+Question:
+{query}
+"""
+
         try:
-            completion = self.openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": contextualize_prompt},
-                    {"role": "user", "content": f"Chat history:\n{conversation_history}\n\nQuestion:\n{query}"}
-                ]
-            )
-            return completion.choices[0].message.content
+            response = self.claude_client.chat([
+                {"role": "user", "content": prompt},
+            ])
+            return response.strip()
         except Exception as e:
             print(f"Error contextualizing query: {str(e)}")
-            return query  # Fallback to original query
-    
+            return query
+
     def get_prompt(self, context: str, conversation_history: str, query: str):
-        """Generate a prompt combining context, history, and query"""
-        prompt = f"""Based on the following context and conversation history,
-        please provide a relevant and contextual response. If the answer cannot
-        be derived from the context, only use the conversation history or say
-        "I cannot answer this based on the provided information."
+        return f"""Based on the following context and conversation history,
+please provide a relevant and contextual response. If the answer cannot
+be derived from the context, only use the conversation history or say
+"I cannot answer this based on the provided information."
 
-        Context from documents:
-        {context}
+Context from documents:
+{context}
 
-        Previous conversation:
-        {conversation_history}
+Previous conversation:
+{conversation_history}
 
-        Human: {query}
-        Assistant:"""
-        return prompt
-    
+Human: {query}
+Assistant:"""
+
     def generate_response(self, query: str, context: str, conversation_history: str = ""):
-        """Generate a response using OpenAI with conversation history"""
         prompt = self.get_prompt(context, conversation_history, query)
-        
         try:
-            response = self.openai_client.chat.completions.create(
-                model="gpt-4",  # or gpt-3.5-turbo for lower cost
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that answers questions based on the provided context."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0,  # Lower temperature for more focused responses
-                max_tokens=500
-            )
-            return response.choices[0].message.content
+            response = self.claude_client.chat([
+                {"role": "user", "content": prompt}
+            ])
+            return response.strip()
         except Exception as e:
             return f"Error generating response: {str(e)}"
-    
+
     def create_session(self):
-        """Create a new conversation session"""
         return self.conversation_manager.create_session()
-    
-    def chat(self, query: str, session_id: str, n_chunks: int = 3, verbose: bool = False):
-        """Main chat function with conversation history"""
-        # Get conversation history
+
+    def chat(self, query: str, session_id: str, n_chunks: int = 3, verbose: bool = True):
         conversation_history = self.conversation_manager.format_history_for_prompt(session_id)
-        
-        # Handle follow-up questions
         contextualized_query = self.contextualize_query(query, conversation_history)
-        
+
         if verbose:
             print(f"Original Query: {query}")
             print(f"Contextualized Query: {contextualized_query}")
-        
-        # Get relevant chunks
-        search_results = self.db.semantic_search(contextualized_query, n_chunks)
+            print(f"Using session_id: {session_id}")
+
+        # Pass the session_id to semantic_search
+        search_results = self.db.semantic_search(contextualized_query, session_id, n_chunks)
         context, sources = self.db.get_context_with_sources(search_results)
-        
+
         if verbose:
             print(f"Context: {context[:200]}...")
             print(f"Sources: {sources}")
-        
-        # Generate response
+
         response = self.generate_response(contextualized_query, context, conversation_history)
-        
-        # Add to conversation history
+
         self.conversation_manager.add_message(session_id, "user", query)
         self.conversation_manager.add_message(session_id, "assistant", response)
-        
+
         return {
             "response": response,
             "sources": sources,
             "contextualized_query": contextualized_query
         }
-    
+
     def print_search_results(self, results):
-        """Print formatted search results for debugging"""
         print("\nSearch Results:\n" + "-" * 50)
         for i in range(len(results['documents'][0])):
             doc = results['documents'][0][i]
             meta = results['metadatas'][0][i]
             distance = results['distances'][0][i]
-            
+
             print(f"\nResult {i + 1}")
             print(f"Source: {meta['source']}, Chunk {meta['chunk']}")
             print(f"Distance: {distance}")
             print(f"Content: {doc[:200]}...")
 
 # =============================================================================
-# EXAMPLE USAGE
+# DOCUMENT UPLOAD AND PROCESSING
 # =============================================================================
 
-def main():
-    """Example usage of the RAG Chatbot"""
-    
-    # Initialize the chatbot
-    chatbot = RAGChatbot(
-        openai_api_key="your-openai-api-key-here",  # Replace with your API key
-        db_path="chroma_db"
-    )
-    
-    # Load documents (create a 'docs' folder with your documents)
-    documents_folder = "docs"
-    if os.path.exists(documents_folder):
-        print("Loading documents...")
-        chatbot.load_documents(documents_folder)
-    else:
-        print(f"Please create a '{documents_folder}' folder and add your documents")
-        return
-    
-    # Create a conversation session
-    session_id = chatbot.create_session()
-    print(f"Created session: {session_id}")
-    
-    # Example conversation
-    queries = [
-        "When was GreenGrow Innovations founded?",
-        "Where is it located?",
-        "What products do they make?"
-    ]
-    
-    for query in queries:
-        print(f"\n{'='*60}")
-        print(f"Query: {query}")
-        print('='*60)
+class DocumentProcessor:
+    def __init__(self, upload_dir: str = "uploads", db: RAGDatabase = None):
+        """Initialize document processor"""
+        self.upload_dir = upload_dir
+        self.db = db
+        self.processing_status = {}
+        # Dictionary to track documents by session
+        self.session_documents = {}
         
-        result = chatbot.chat(query, session_id, verbose=True)
+        # Create upload directory if it doesn't exist
+        os.makedirs(upload_dir, exist_ok=True)
+    
+    def validate_file_type(self, filename: str) -> bool:
+        """Validate if file type is supported"""
+        allowed_extensions = {'.pdf', '.docx', '.txt'}
+        _, file_extension = os.path.splitext(filename)
+        return file_extension.lower() in allowed_extensions
+    
+    def save_uploaded_file(self, file: UploadFile) -> str:
+        """Save uploaded file to disk and return the file path"""
+        # Generate a unique filename
+        unique_filename = f"{uuid.uuid4()}_{secure_filename(file.filename)}"
+        file_path = os.path.join(self.upload_dir, unique_filename)
         
-        print(f"\nResponse: {result['response']}")
-        print(f"\nSources: {result['sources']}")
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        return file_path
+    
+    def process_document(self, file_path: str, document_id: str, session_id: str = None):
+        """Process a document and add it to the database"""
+        try:
+            # Get the current status to preserve filename
+            current_status = self.processing_status.get(document_id, {})
+            filename = current_status.get("filename", os.path.basename(file_path))
+            
+            # Update status to processing
+            self.processing_status[document_id] = {
+                "filename": filename,
+                "status": "processing",
+                "message": "Document is being processed",
+                "timestamp": datetime.now().isoformat(),
+                "session_id": session_id
+            }
+            
+            # Track document by session
+            if session_id:
+                if session_id not in self.session_documents:
+                    self.session_documents[session_id] = []
+                self.session_documents[session_id].append(document_id)
+            
+            # Process the document
+            ids, texts, metadatas = self.db.process_document(file_path, session_id)
+            
+            # Add to collection
+            self.db.add_to_collection(ids, texts, metadatas, session_id)
+            
+            # Update status to completed
+            self.processing_status[document_id] = {
+                "filename": filename,
+                "status": "completed",
+                "message": f"Document processed successfully with {len(texts)} chunks",
+                "timestamp": datetime.now().isoformat(),
+                "chunks": len(texts),
+                "session_id": session_id
+            }
+            
+        except Exception as e:
+            # Update status to failed
+            self.processing_status[document_id] = {
+                "status": "failed",
+                "message": f"Error processing document: {str(e)}",
+                "timestamp": datetime.now().isoformat(),
+                "session_id": session_id
+            }
+    
+    def get_document_status(self, document_id: str) -> dict:
+        """Get the processing status of a document"""
+        return self.processing_status.get(document_id, {
+            "status": "not_found",
+            "message": "Document ID not found"
+        })
+    
+    def get_all_documents(self, session_id: str = None) -> list:
+        """Get a list of all documents and their processing status, optionally filtered by session"""
+        if session_id:
+            return [
+                {
+                    "document_id": doc_id,
+                    **status
+                }
+                for doc_id, status in self.processing_status.items()
+                if status.get("session_id") == session_id
+            ]
+        else:
+            return [
+                {
+                    "document_id": doc_id,
+                    **status
+                }
+                for doc_id, status in self.processing_status.items()
+            ]
+    
+    def clear_session_documents(self, session_id: str) -> bool:
+        """Clear all documents associated with a session"""
+        if not session_id or session_id not in self.session_documents:
+            return False
+            
+        # Get document IDs for this session
+        doc_ids = self.session_documents[session_id]
+        
+        # Remove documents from processing status
+        for doc_id in doc_ids:
+            if doc_id in self.processing_status:
+                del self.processing_status[doc_id]
+        
+        # Remove session from tracking
+        del self.session_documents[session_id]
+        
+        return True
+
+# =============================================================================
+# FASTAPI APPLICATION
+# =============================================================================
+
+# Initialize FastAPI app
+app = FastAPI(title="RAG Chatbot API", description="API for RAG Chatbot with document upload and processing")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
+# Get configuration from environment variables
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "uploads")
+DB_PATH = os.environ.get("DB_PATH", "chroma_db")
+COLLECTION_NAME = os.environ.get("COLLECTION_NAME", "documents_collection")
+MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024))  # Default: 10MB
+
+# Initialize RAG database with collection name from environment variables
+rag_database = RAGDatabase(db_path=DB_PATH, collection_name=COLLECTION_NAME)
+
+# Initialize document processor with the shared RAG database
+document_processor = DocumentProcessor(upload_dir=UPLOAD_DIR, db=rag_database)
+
+chatbot = RAGChatbot(db=rag_database)
+
+class UploadRequest(BaseModel):
+    session_id: Optional[str] = None
+
+@app.post("/upload", response_model=dict)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    session_id: Optional[str] = Form(None),
+    max_file_size: int = MAX_FILE_SIZE
+):
+    """
+    Upload one or more documents for processing.
+    
+    - Accepts PDF, DOCX, and TXT files
+    - Enforces file size limit (default: 10MB)
+    - Returns unique identifiers for each document
+    - Processes documents in the background
+    - Associates documents with a session if session_id is provided
+    """
+    results = []
+    
+    for file in files:
+        # Generate a unique document ID
+        document_id = str(uuid.uuid4())
+        
+        # Validate file type
+        if not document_processor.validate_file_type(file.filename):
+            results.append({
+                "filename": file.filename,
+                "document_id": document_id,
+                "status": "rejected",
+                "message": "Unsupported file type. Allowed types: PDF, DOCX, TXT"
+            })
+            continue
+        
+        # Check file size
+        file.file.seek(0, 2)  # Move to end of file to get size
+        file_size = file.file.tell()
+        file.file.seek(0)  # Reset file position
+        
+        if file_size > max_file_size:
+            results.append({
+                "filename": file.filename,
+                "document_id": document_id,
+                "status": "rejected",
+                "message": f"File too large. Maximum size: {max_file_size / (1024 * 1024):.1f} MB"
+            })
+            continue
+        
+        try:
+            # Save the file
+            file_path = document_processor.save_uploaded_file(file)
+            
+            # Extract original filename without UUID prefix
+            original_filename = file.filename
+            
+            # Update initial status
+            document_processor.processing_status[document_id] = {
+                "filename": original_filename,
+                "status": "queued",
+                "message": "Document queued for processing",
+                "timestamp": datetime.now().isoformat(),
+                "file_size": file_size,
+                "session_id": session_id
+            }
+            
+            # Process document in background
+            background_tasks.add_task(
+                document_processor.process_document,
+                file_path,
+                document_id,
+                session_id
+            )
+            
+            results.append({
+                "filename": file.filename,
+                "document_id": document_id,
+                "status": "accepted",
+                "message": "Document accepted and queued for processing",
+                "session_id": session_id
+            })
+            
+        except Exception as e:
+            results.append({
+                "filename": file.filename,
+                "document_id": document_id,
+                "status": "error",
+                "message": f"Error processing upload: {str(e)}"
+            })
+    
+    return {"documents": results}
+
+@app.get("/document/{document_id}/status")
+async def get_document_status(document_id: str):
+    """Get the processing status of a document"""
+    status = document_processor.get_document_status(document_id)
+    
+    if status.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    return status
+
+@app.get("/documents")
+async def list_documents(session_id: Optional[str] = None):
+    """
+    Get a list of all documents and their processing status.
+    
+    - If session_id is provided, only returns documents for that session
+    """
+    return {"documents": document_processor.get_all_documents(session_id)}
+
+class ClearSessionRequest(BaseModel):
+    session_id: str
+
+@app.post("/clear-session")
+async def clear_session(request: ClearSessionRequest):
+    """
+    Clear all data for a specific session.
+    
+    - Removes all documents associated with the session
+    - Clears conversation history
+    - Deletes vector data from the database
+    """
+    session_id = request.session_id
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Session ID is required")
+    
+    # Clear documents
+    document_processor.clear_session_documents(session_id)
+    
+    # Clear vector data
+    rag_database.clear_session_data(session_id)
+    
+    # Clear conversation history
+    try:
+        if session_id in chatbot.conversation_manager.conversations:
+            del chatbot.conversation_manager.conversations[session_id]
+    except Exception as e:
+        print(f"Error clearing conversation history: {str(e)}")
+    
+    return {"success": True, "message": "Session data cleared successfully"}
+
+class ChatRequest(BaseModel):
+    query: str
+    session_id: Optional[str] = None
+    n_chunks: int = 3
+
+
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    """
+    Chat with the RAG chatbot.
+    
+    - If no session_id is provided, a new session will be created
+    - Returns the chatbot's response and sources
+    """
+    # Create a new session if none provided
+    session_id = request.session_id or chatbot.create_session()
+    result = chatbot.chat(request.query, session_id, request.n_chunks)
+    
+    
+    return {
+        "session_id": session_id,
+        "response": result["response"],
+        "sources": result["sources"],
+        "contextualized_query": result["contextualized_query"]
+    }
+
+# =============================================================================
+# SERVER STARTUP
+# =============================================================================
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    
+    # Get host and port from environment variables
+    HOST = os.environ.get("HOST", "0.0.0.0")
+    PORT = int(os.environ.get("PORT", 8000))
+    
+    print(f"Starting server at http://{HOST}:{PORT}")
+    print(f"API documentation available at http://{HOST}:{PORT}/docs")
+    
+    uvicorn.run(app, host=HOST, port=PORT)
