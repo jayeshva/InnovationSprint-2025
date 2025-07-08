@@ -1,0 +1,59 @@
+# Core LLM and orchestration
+langchain
+langchain-community
+langgraph
+langchain-core
+
+# AWS Bedrock
+boto3
+botocore
+langchain-aws
+
+# FastAPI & server
+fastapi
+uvicorn
+python-dotenv
+
+# Vector store & parsing
+faiss-cpu
+tiktoken
+pypdf
+unstructured
+
+# Google APIs
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
+
+# MCP Protocol
+mcp
+
+# Web search
+google-search-results
+
+# Document processing
+PyPDF2
+python-docx
+openpyxl
+
+# Text processing
+beautifulsoup4
+lxml
+
+# HTTP & async
+requests
+aiohttp
+aiofiles
+httpx
+
+# OpenAI Embeddings (used by FAISS/embedding logic)
+openai
+
+# Development tools
+ipython
+rich
+
+# Logging and monitoring
+structlog
+pydantic
