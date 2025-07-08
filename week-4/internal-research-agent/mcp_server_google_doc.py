@@ -42,7 +42,7 @@ class GoogleDocsServer:
         try:
             if GOOGLE_CREDS:
                 # Load credentials from JSON string
-                creds_info = json.loads("service-account.json")
+                creds_info = json.loads(GOOGLE_CREDS)
                 credentials = service_account.Credentials.from_service_account_info(
                     creds_info,
                     scopes=[
