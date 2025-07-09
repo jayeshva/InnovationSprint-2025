@@ -19,6 +19,7 @@ faiss-cpu
 tiktoken
 pypdf
 unstructured
+sentence-transformers
 
 # Google APIs
 google-api-python-client
@@ -27,6 +28,7 @@ google-auth-httplib2
 google-auth-oauthlib
 
 # MCP Protocol
+fastmcp
 mcp
 
 # Web search

@@ -13,10 +13,9 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-import mcp.server.stdio
+from mcp.server import Server
 import mcp.types as types
-from mcp.server import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from mcp.server.stdio import stdio_server
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,7 +30,7 @@ GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")
 
 class GoogleDocsServer:
     def __init__(self):
-        self.server = Server("google-docs")
+        self.server = Server(name="google-docs")
         self.drive_service = None
         self.docs_service = None
         self._initialize_services()
@@ -42,7 +41,8 @@ class GoogleDocsServer:
         try:
             if GOOGLE_CREDS:
                 # Load credentials from JSON string
-                creds_info = json.loads(GOOGLE_CREDS)
+                with open("service-account.json", "r") as f:
+                    creds_info = json.load(f)
                 credentials = service_account.Credentials.from_service_account_info(
                     creds_info,
                     scopes=[
@@ -424,14 +424,14 @@ class GoogleDocsServer:
             )]
 
 async def main():
+
     logger.info("Starting GoogleDocsServer...")
-    server = GoogleDocsServer()
-    
-    logger.info("Running MCP server...")
-    await server.server.run(
-        read_stream=mcp.server.stdio.StdioReadStream(),
-        write_stream=mcp.server.stdio.StdioWriteStream()
-    )
+    GoogleDocsServer()  # Initializes and sets up handlers
+
+    logger.info("Running MCP server via stdio_server...")
+    async with stdio_server():
+        await asyncio.Event().wait()  # Keeps the server running
+
 
 
 if __name__ == "__main__":

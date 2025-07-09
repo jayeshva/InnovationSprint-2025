@@ -12,10 +12,10 @@ logger = logging.getLogger(__name__)
 class MCPGoogleDocsClient:
     def __init__(self):
         self.session = None
-        self.server_params = StdioServerParameters(command="python", args=["./mcp_tool.py"], env=None)
+        self.server_params = StdioServerParameters(command="python", args=["./mcp_server_google_doc.py"], env=None)
 
     async def start(self):
-       if not os.path.exists("mcp_tool.py"):
+       if not os.path.exists("mcp_server_google_doc.py"):
           logger.warning("MCP server not found")
           return
 
