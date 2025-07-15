@@ -1,0 +1,30 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.844.0",
+    "@aws-sdk/credential-provider-node": "^3.844.0",
+    "@huggingface/inference": "^4.5.1",
+    "@huggingface/transformers": "^3.6.3",
+    "@langchain/community": "^0.3.48",
+    "@langchain/core": "^0.3.62",
+    "@langchain/langgraph": "^0.3.8",
+    "express": "^5.1.0",
+    "fastify": "^5.4.0",
+    "langchain": "^0.3.29"
+  },
+  "name": "multi-agent",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node --loader ts-node/esm apps/api_server/main.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}
