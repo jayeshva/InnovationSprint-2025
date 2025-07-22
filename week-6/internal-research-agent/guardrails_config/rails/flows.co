@@ -1,0 +1,27 @@
+# Input moderation flow
+define flow input moderation
+  if user ask jailbreak
+    bot refuse inappropriate
+    stop
+
+  if user ask inappropriate
+    bot refuse inappropriate
+    stop
+    
+  if user ask personal info
+    bot refuse personal info
+    stop
+
+  if user ask unrelated
+    bot refuse unrelated
+    stop
+
+# Fact checking flow
+define flow fact checking
+  if bot provide hr info
+    bot "Please verify this information with HR if you need official confirmation."
+
+# Output moderation
+define flow output moderation
+  if bot provide sensitive info
+    bot "This information is for internal use only."

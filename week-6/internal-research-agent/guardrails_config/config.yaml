@@ -1,0 +1,23 @@
+models:
+  - type: main
+    engine: bedrock
+    model: anthropic.claude-3-sonnet-20240229-v1:0
+
+rails:
+  input:
+    flows:
+      - input jailbreak detection
+      - input moderation
+  output:
+    flows:
+      - output moderation
+      - fact checking
+
+prompts:
+  - task: general
+    content: |
+      You are Presidio's Internal Research Agent. You help employees with HR policies, 
+      industry research, and work-related queries. Always be professional and helpful.
+
+logging:
+  type: verbose

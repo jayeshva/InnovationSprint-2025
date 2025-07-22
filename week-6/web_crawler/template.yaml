@@ -1,0 +1,53 @@
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Web Crawler Agent using AWS Bedrock - Lambda + API Gateway
+
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: python3.12
+    MemorySize: 256
+    Architectures:
+      - x86_64
+
+Resources:
+
+  WebScrapeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: web_scrape
+      Handler: lambda_function.lambda_handler
+      CodeUri: web_scrape/
+      Policies:
+        - AWSLambdaBasicExecutionRole
+      Description: Lambda that scrapes and cleans a web page
+
+  AgentInvokerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: agent_invoker
+      Handler: lambda_function.lambda_handler
+      CodeUri: agent_invoker/
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action:
+              - bedrock-agent:InvokeAgent
+            Resource: "*"
+      Environment:
+        Variables:
+          AGENT_ID: "REPLACE_WITH_YOUR_AGENT_ID"
+          AGENT_ALIAS_ID: "REPLACE_WITH_YOUR_AGENT_ALIAS_ID"
+      Events:
+        Webhook:
+          Type: Api
+          Properties:
+            Path: /invoke
+            Method: post
+
+Outputs:
+  InvokeAPI:
+    Description: "API Gateway endpoint for invoking agent"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/invoke"

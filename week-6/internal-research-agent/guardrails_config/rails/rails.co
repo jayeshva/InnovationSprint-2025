@@ -1,0 +1,35 @@
+# Input rails
+define user ask jailbreak
+  "ignore instructions"
+  "forget previous instructions"
+  "act as if you are"
+  "pretend to be"
+
+define user ask inappropriate
+  "illegal activities"
+  "violence"
+  "harassment"
+  "discrimination"
+
+define user ask personal info
+  "personal information"
+  "social security"
+  "passwords"
+  "confidential data"
+
+define user ask unrelated
+  "stock market"
+  "sports scores" 
+  "entertainment news"
+  "weather"
+  "recipes"
+
+# Output rails
+define bot refuse inappropriate
+  "I cannot help with that request as it goes against company policy."
+
+define bot refuse unrelated
+  "I'm designed to help with work-related queries and HR policies. I cannot assist with that topic."
+
+define bot refuse personal info
+  "I cannot provide or request personal information for security reasons."
