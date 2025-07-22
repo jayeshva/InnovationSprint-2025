@@ -31,8 +31,8 @@
 - **Expected Tools**: HRPolicyRAG
 - **Category**: policy_inquiry
 - **Correctness**: ✅ True
-- **Latency**: -
-- **Hallucination**: -
+- **Latency**: 15
+- **Hallucination**: False
 - **Tool Usage Success**: -
 - **Tool Match**: Subset (some tools missing)
 - **Output**: Unfortunately, I do not have enough information from the provided sources to share details about the travel...
